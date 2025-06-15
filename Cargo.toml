@@ -1,7 +1,12 @@
 [package]
 name = "rquickjs-serde"
+description = "Serde support for rquickjs"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/rquickjs/rquickjs-serde"
+readme = "README.md"
+authors = ["Emile Fugulin <code@efugulin.com>", "The Javy Project Developers"]
 
 [dependencies]
 rquickjs = "0.9"
