@@ -2,7 +2,9 @@ use std::str;
 
 use rquickjs::{Ctx, Error as JSError, String as JSString, Value, qjs};
 
-pub fn as_key(v: &Value) -> anyhow::Result<String> {
+use crate::err::{Error, Result};
+
+pub fn as_key(v: &Value) -> Result<String> {
     if v.is_string() {
         let js_str = v.as_string().unwrap();
         let v = js_str
@@ -10,7 +12,7 @@ pub fn as_key(v: &Value) -> anyhow::Result<String> {
             .unwrap_or_else(|e| to_string_lossy(js_str.ctx(), js_str, e));
         Ok(v)
     } else {
-        anyhow::bail!("map keys must be a string")
+        Err(Error::new("map keys must be a string"))
     }
 }
 

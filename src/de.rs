@@ -1,13 +1,11 @@
-use anyhow::{anyhow, bail};
 use rquickjs::{
-    Array, Exception, Filter, Object, String as JSString, Value,
+    Array, Exception, Filter, Function, Null, Object, String as JSString, Value,
+    atom::PredefinedAtom,
     function::This,
     object::ObjectIter,
     qjs::{JS_GetClassID, JS_GetProperty},
 };
-use rquickjs::{Function, Null, atom::PredefinedAtom};
-use serde::de::{self, Error as SerError};
-use serde::forward_to_deserialize_any;
+use serde::{de, forward_to_deserialize_any};
 
 use crate::err::{Error, Result};
 use crate::utils::{as_key, to_string_lossy};
@@ -21,12 +19,6 @@ enum ClassId {
     String = 5,
     Bool = 6,
     BigInt = 33,
-}
-
-impl SerError for Error {
-    fn custom<T: std::fmt::Display>(e: T) -> Self {
-        Error::Custom(anyhow!(e.to_string()))
-    }
 }
 
 /// `Deserializer` is a deserializer for [Value] values, implementing the `serde::Deserializer` trait.
@@ -72,7 +64,7 @@ impl<'js> Deserializer<'js> {
             return visitor.visit_i32(
                 self.value
                     .as_int()
-                    .ok_or_else(|| anyhow!("Failed to convert value to i32"))?,
+                    .ok_or_else(|| Error::new("Failed to convert value to i32"))?,
             );
         }
 
@@ -80,7 +72,7 @@ impl<'js> Deserializer<'js> {
             let f64_representation = self
                 .value
                 .as_float()
-                .ok_or_else(|| anyhow!("Failed to convert value to f64"))?;
+                .ok_or_else(|| Error::new("Failed to convert value to f64"))?;
             let is_positive = f64_representation.is_sign_positive();
             let safe_integer_range = (MIN_SAFE_INTEGER as f64)..=(MAX_SAFE_INTEGER as f64);
             let whole = f64_representation.fract() == 0.0;
@@ -104,7 +96,7 @@ impl<'js> Deserializer<'js> {
         let v = self
             .stack
             .pop()
-            .ok_or_else(|| anyhow!("No entries found in the deserializer stack"))?;
+            .ok_or_else(|| Error::new("No entries found in the deserializer stack"))?;
         Ok(v)
     }
 
@@ -114,7 +106,7 @@ impl<'js> Deserializer<'js> {
     fn check_cycles(&self) -> Result<()> {
         for val in self.stack.iter().rev() {
             if self.value.eq(val) {
-                return Err(Error::from(Exception::throw_type(
+                return Err(Error::new(Exception::throw_type(
                     val.ctx(),
                     "circular dependency",
                 )));
@@ -138,7 +130,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         if get_class_id(&self.value) == ClassId::Number as u32 {
             let value_of = get_valueof(&self.value);
             if let Some(f) = value_of {
-                let v = f.call((This(self.value.clone()),))?;
+                let v = f.call((This(self.value.clone()),)).map_err(Error::new)?;
                 self.value = v;
                 return self.deserialize_number(visitor);
             }
@@ -151,7 +143,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         if get_class_id(&self.value) == ClassId::Bool as u32 {
             let value_of = get_valueof(&self.value);
             if let Some(f) = value_of {
-                let v = f.call((This(self.value.clone()),))?;
+                let v = f.call((This(self.value.clone()),)).map_err(Error::new)?;
                 return visitor.visit_bool(v);
             }
         }
@@ -163,7 +155,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         if get_class_id(&self.value) == ClassId::String as u32 {
             let value_of = get_to_string(&self.value);
             if let Some(f) = value_of {
-                let v = f.call(((This(self.value.clone())),))?;
+                let v = f.call(((This(self.value.clone())),)).map_err(Error::new)?;
                 self.value = v;
             }
         }
@@ -198,7 +190,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             ensure_supported(&self.value)?;
 
             if let Some(f) = get_to_json(&self.value) {
-                let v: Value = f.call((This(self.value.clone()),))?;
+                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
 
                 if v.is_undefined() {
                     self.value = Value::new_undefined(v.ctx().clone());
@@ -218,13 +210,13 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             || self.value.type_of() == rquickjs::Type::BigInt
         {
             if let Some(f) = get_to_json(&self.value) {
-                let v: Value = f.call((This(self.value.clone()),))?;
+                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
                 self.value = v;
                 return self.deserialize_any(visitor);
             }
         }
 
-        Err(Error::from(Exception::throw_type(
+        Err(Error::new(Exception::throw_type(
             self.value.ctx(),
             "Unsupported type",
         )))
@@ -299,10 +291,12 @@ impl<'a, 'de> MapAccess<'a, 'de> {
 
     /// Pops the top level value representing this sequence.
     /// Errors if a different value is popped.
-    fn pop(&mut self) -> anyhow::Result<()> {
+    fn pop(&mut self) -> Result<()> {
         let v = self.de.pop_visited()?;
         if v != self.obj.clone().into_value() {
-            bail!("Popped a mismatched value. Expected the top level sequence value");
+            return Err(Error::new(
+                "Popped a mismatched value. Expected the top level sequence value",
+            ));
         }
 
         Ok(())
@@ -318,11 +312,11 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
     {
         loop {
             if let Some(kv) = self.properties.next() {
-                let (k, v) = kv?;
+                let (k, v) = kv.map_err(Error::new)?;
 
                 let to_json = get_to_json(&v);
                 let v = if let Some(f) = to_json {
-                    f.call((This(v.clone()), k.clone()))?
+                    f.call((This(v.clone()), k.clone())).map_err(Error::new)?
                 } else {
                     v
                 };
@@ -338,13 +332,13 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
                 if class_id == ClassId::Bool as u32 || class_id == ClassId::Number as u32 {
                     let value_of = get_valueof(&v);
                     if let Some(f) = value_of {
-                        let v = f.call((This(v.clone()),))?;
+                        let v = f.call((This(v.clone()),)).map_err(Error::new)?;
                         self.de.current_kv = Some((k.clone(), v));
                     }
                 } else if class_id == ClassId::String as u32 {
                     let to_string = get_to_string(&v);
                     if let Some(f) = to_string {
-                        let v = f.call((This(v.clone()),))?;
+                        let v = f.call((This(v.clone()),)).map_err(Error::new)?;
                         self.de.current_kv = Some((k.clone(), v));
                     }
                 } else {
@@ -393,15 +387,19 @@ impl<'a, 'de: 'a> SeqAccess<'a, 'de> {
         // using the bindings `Array::len` given that according to the spec
         // it's fine to return any value, not just a number from the
         // `length` property.
-        let value: Value = seq.as_object().get(PredefinedAtom::Length)?;
+        let value: Value = seq
+            .as_object()
+            .get(PredefinedAtom::Length)
+            .map_err(Error::new)?;
         let length: usize = if value.is_number() {
             value.as_number().unwrap() as usize
         } else {
             let value_of: Function = value
                 .as_object()
                 .expect("length to be an object")
-                .get(PredefinedAtom::ValueOf)?;
-            value_of.call(())?
+                .get(PredefinedAtom::ValueOf)
+                .map_err(Error::new)?;
+            value_of.call(()).map_err(Error::new)?
         };
 
         Ok(Self {
@@ -414,10 +412,12 @@ impl<'a, 'de: 'a> SeqAccess<'a, 'de> {
 
     /// Pops the top level value representing this sequence.
     /// Errors if a different value is popped.
-    fn pop(&mut self) -> anyhow::Result<()> {
+    fn pop(&mut self) -> Result<()> {
         let v = self.de.pop_visited()?;
         if v != self.seq.clone().into_value() {
-            bail!("Popped a mismatched value. Expected the top level sequence value");
+            return Err(Error::new(
+                "Popped a mismatched value. Expected the top level sequence value",
+            ));
         }
 
         Ok(())
@@ -432,12 +432,14 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
         T: de::DeserializeSeed<'de>,
     {
         if self.index < self.length {
-            let el = self.seq.get(self.index)?;
+            let el = self.seq.get(self.index).map_err(Error::new)?;
             let to_json = get_to_json(&el);
 
             if let Some(f) = to_json {
                 let index_value = JSString::from_str(el.ctx().clone(), &self.index.to_string());
-                self.de.value = f.call((This(el.clone()), index_value))?;
+                self.de.value = f
+                    .call((This(el.clone()), index_value))
+                    .map_err(Error::new)?;
             } else if ensure_supported(&el)? {
                 self.de.value = el
             } else {
@@ -507,7 +509,7 @@ fn ensure_supported(value: &Value<'_>) -> Result<bool> {
     }
 
     if class_id == ClassId::BigInt as u32 {
-        return Err(Error::from(Exception::throw_type(
+        return Err(Error::new(Exception::throw_type(
             value.ctx(),
             "BigInt not supported",
         )));

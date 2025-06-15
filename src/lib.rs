@@ -131,12 +131,12 @@ where
 mod tests {
     use std::collections::BTreeMap;
 
-    use anyhow::Result;
     use quickcheck::quickcheck;
     use serde::de::DeserializeOwned;
     use serde::{Deserialize, Serialize};
 
     use crate::de::Deserializer as ValueDeserializer;
+    use crate::err::Result;
     use crate::ser::Serializer as ValueSerializer;
     use crate::test::Runtime;
     use crate::{MAX_SAFE_INTEGER, MIN_SAFE_INTEGER};

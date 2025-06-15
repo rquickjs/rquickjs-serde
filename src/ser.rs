@@ -1,6 +1,5 @@
-use anyhow::anyhow;
 use rquickjs::{Array, Ctx, Object, String as JSString, Value, object::Property};
-use serde::{Serialize, ser, ser::Error as SerError};
+use serde::{Serialize, ser};
 
 use crate::err::{Error, Result};
 
@@ -18,12 +17,6 @@ pub struct Serializer<'js> {
     pub context: Ctx<'js>,
     pub value: Value<'js>,
     pub key: Value<'js>,
-}
-
-impl SerError for Error {
-    fn custom<T: std::fmt::Display>(msg: T) -> Self {
-        Error::Custom(anyhow!(msg.to_string()))
-    }
 }
 
 impl<'js> Serializer<'js> {
@@ -106,7 +99,7 @@ impl ser::Serializer for &mut Serializer<'_> {
     }
 
     fn serialize_str(self, v: &str) -> Result<()> {
-        let js_string = JSString::from_str(self.context.clone(), v).map_err(Error::custom)?;
+        let js_string = JSString::from_str(self.context.clone(), v).map_err(Error::new)?;
         self.value = Value::from(js_string);
         Ok(())
     }
@@ -148,7 +141,7 @@ impl ser::Serializer for &mut Serializer<'_> {
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq> {
-        let arr = Array::new(self.context.clone()).map_err(Error::custom)?;
+        let arr = Array::new(self.context.clone()).map_err(Error::new)?;
         self.value = arr.into_value();
         Ok(self)
     }
@@ -166,7 +159,7 @@ impl ser::Serializer for &mut Serializer<'_> {
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap> {
-        let obj = Object::new(self.context.clone()).map_err(Error::custom)?;
+        let obj = Object::new(self.context.clone()).map_err(Error::new)?;
         self.value = Value::from(obj);
         Ok(self)
     }
@@ -205,17 +198,16 @@ impl ser::Serializer for &mut Serializer<'_> {
     where
         T: ?Sized + Serialize,
     {
-        let obj = Object::new(self.context.clone()).map_err(Error::custom)?;
+        let obj = Object::new(self.context.clone()).map_err(Error::new)?;
         value.serialize(&mut *self)?;
-        obj.set(variant, self.value.clone())
-            .map_err(Error::custom)?;
+        obj.set(variant, self.value.clone()).map_err(Error::new)?;
         self.value = Value::from(obj);
 
         Ok(())
     }
 
     fn serialize_bytes(self, _: &[u8]) -> Result<()> {
-        Err(Error::custom("Cannot serialize bytes"))
+        Err(Error::new("Cannot serialize bytes"))
     }
 }
 
@@ -233,9 +225,9 @@ impl ser::SerializeSeq for &mut Serializer<'_> {
         if let Some(v) = self.value.as_array() {
             return v
                 .set(v.len(), element_serializer.value.clone())
-                .map_err(|e| Error::custom(e.to_string()));
+                .map_err(Error::new);
         }
-        Err(Error::custom("Expected to be an array"))
+        Err(Error::new("Expected to be an array"))
     }
 
     fn end(self) -> Result<()> {
@@ -257,10 +249,10 @@ impl ser::SerializeTuple for &mut Serializer<'_> {
         if let Some(v) = self.value.as_array() {
             return v
                 .set(v.len(), element_serializer.value.clone())
-                .map_err(|e| Error::custom(e.to_string()));
+                .map_err(Error::new);
         }
 
-        Err(Error::custom("Expected to be an array"))
+        Err(Error::new("Expected to be an array"))
     }
 
     fn end(self) -> Result<()> {
@@ -281,10 +273,10 @@ impl ser::SerializeTupleStruct for &mut Serializer<'_> {
         if let Some(v) = self.value.as_array() {
             return v
                 .set(v.len(), field_serializer.value.clone())
-                .map_err(|e| Error::custom(e.to_string()));
+                .map_err(Error::new);
         }
 
-        Err(Error::custom("Expected to be an array"))
+        Err(Error::new("Expected to be an array"))
     }
 
     fn end(self) -> Result<()> {
@@ -306,10 +298,10 @@ impl ser::SerializeTupleVariant for &mut Serializer<'_> {
         if let Some(v) = self.value.as_array() {
             return v
                 .set(v.len(), field_serializer.value.clone())
-                .map_err(|e| Error::custom(e.to_string()));
+                .map_err(Error::new);
         }
 
-        Err(Error::custom("Expected to be an array"))
+        Err(Error::new("Expected to be an array"))
     }
 
     fn end(self) -> Result<()> {
@@ -343,9 +335,9 @@ impl ser::SerializeMap for &mut Serializer<'_> {
                 .configurable()
                 .enumerable();
             o.prop::<_, _, _>(self.key.clone(), prop)
-                .map_err(|e| Error::custom(e.to_string()))
+                .map_err(Error::new)
         } else {
-            Err(Error::custom("Expected to be an object"))
+            Err(Error::new("Expected to be an object"))
         }
     }
 
@@ -368,10 +360,10 @@ impl ser::SerializeStruct for &mut Serializer<'_> {
         if let Some(o) = self.value.as_object() {
             return o
                 .set(key, field_serializer.value.clone())
-                .map_err(|e| Error::custom(e.to_string()));
+                .map_err(Error::new);
         }
 
-        Err(Error::custom("Expected to be an object"))
+        Err(Error::new("Expected to be an object"))
     }
 
     fn end(self) -> Result<()> {
@@ -393,10 +385,10 @@ impl ser::SerializeStructVariant for &mut Serializer<'_> {
         if let Some(o) = self.value.as_object() {
             return o
                 .set(key, field_serializer.value.clone())
-                .map_err(|e| Error::custom(e.to_string()));
+                .map_err(Error::new);
         }
 
-        Err(Error::custom("Expected to be an object"))
+        Err(Error::new("Expected to be an object"))
     }
 
     fn end(self) -> Result<()> {
@@ -408,10 +400,10 @@ impl ser::SerializeStructVariant for &mut Serializer<'_> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use anyhow::Result;
     use serde::{Serialize, Serializer};
 
     use super::Serializer as ValueSerializer;
+    use crate::err::Result;
     use crate::test::Runtime;
     use crate::{MAX_SAFE_INTEGER, MIN_SAFE_INTEGER};
     use quickcheck::quickcheck;
