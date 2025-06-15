@@ -14,6 +14,8 @@ use crate::utils::{as_key, to_string_lossy};
 use crate::{MAX_SAFE_INTEGER, MIN_SAFE_INTEGER};
 
 // Class IDs, for internal, deserialization purposes only.
+// FIXME: This can change since the ABI is not stable.
+// See https://github.com/quickjs-ng/quickjs/issues/758
 enum ClassId {
     Number = 4,
     String = 5,
@@ -211,6 +213,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             return result;
         }
 
+        // FIXME: Replace type_of when https://github.com/DelSkayn/rquickjs/pull/458 is merged.
         if get_class_id(&self.value) == ClassId::BigInt as u32
             || self.value.type_of() == rquickjs::Type::BigInt
         {
