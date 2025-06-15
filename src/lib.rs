@@ -1,6 +1,9 @@
 use rquickjs::{Ctx, Value};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
+#[doc(inline)]
+pub use crate::de::Deserializer;
 #[doc(inline)]
 pub use crate::err::{Error, Result};
 #[doc(inline)]
@@ -44,8 +47,8 @@ pub const MIN_SAFE_INTEGER: i64 = -MAX_SAFE_INTEGER;
 ///     let rt = Runtime::new().unwrap();
 ///     let ctx = Context::full(&rt).unwrap();
 ///
-///     ctx.with(|cx| {
-///         let v = rquickjs_serde::to_value(cx, u).unwrap();
+///     ctx.with(|ctx| {
+///         let v = rquickjs_serde::to_value(ctx, u).unwrap();
 ///         let obj = v.into_object().unwrap();
 ///
 ///         let fingerprint: String = obj.get("fingerprint").unwrap();
@@ -68,6 +71,60 @@ where
     let mut serializer = Serializer::from_context(context)?;
     value.serialize(&mut serializer)?;
     Ok(serializer.value)
+}
+
+/// Interpret a `rquickjs::Value` as an instance of type `T`.
+///
+/// # Example
+///
+/// ```
+/// use std::error::Error;
+///
+/// use serde::Deserialize;
+/// use rquickjs::{Runtime, Context, Value};
+///
+/// #[derive(Deserialize, Debug)]
+/// struct User {
+///     fingerprint: String,
+///     location: String,
+/// }
+///
+/// fn deserialize_from_value() -> Result<(), Box<dyn Error>> {
+///     let rt = Runtime::new().unwrap();
+///     let ctx = Context::full(&rt).unwrap();
+///
+///     let v = ctx.with(|ctx| {
+///          ctx.eval::<Value<'_>, _>("var a = {fingerprint: '0xF9BA143B95FF6D82', location: 'Menlo Park, CA'};").unwrap();
+///          let val = ctx.globals().get("a").unwrap();
+///          let u: User = rquickjs_serde::from_value(val).unwrap();
+///          u
+///     });
+///
+///     assert_eq!(v.fingerprint, "0xF9BA143B95FF6D82");
+///     assert_eq!(v.location, "Menlo Park, CA");
+///
+///     Ok(())
+/// }
+/// #
+/// # deserialize_from_value().unwrap();
+/// ```
+///
+/// # Errors
+///
+/// This conversion can fail if the structure of the Value does not match the
+/// structure expected by `T`, for example if `T` is a struct type but the Value
+/// contains something other than a JS Object. It can also fail if the structure
+/// is correct but `T`'s implementation of `Deserialize` decides that something
+/// is wrong with the data, for example required struct fields are missing from
+/// the JS Object or some number is too big to fit in the expected primitive
+/// type.
+#[inline]
+pub fn from_value<T>(value: Value) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let mut deserializer = Deserializer::from(value);
+    T::deserialize(&mut deserializer)
 }
 
 #[cfg(test)]
