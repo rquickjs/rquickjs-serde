@@ -9,9 +9,17 @@ use crate::err::{Error, Result};
 /// serialization framework.
 ///
 /// ```
-/// // Assuming you have [`Ctx`] instance named context
-/// let serializer = Serializer::from_context(context)?;
-/// let value: Value = serializer.serialize_u32(42)?;
+/// # use rquickjs::{Runtime, Context, Value};
+/// # use rquickjs_serde::Serializer;
+/// # use serde::Serializer as _;
+/// #
+/// let rt = Runtime::new().unwrap();
+/// let ctx = Context::full(&rt).unwrap();
+/// ctx.with(|ctx| {
+///     let mut serializer = Serializer::from_context(ctx.clone()).unwrap();
+///     serializer.serialize_u32(42).unwrap();
+///     assert!(serializer.value.is_number());
+/// });
 /// ```
 pub struct Serializer<'js> {
     pub context: Ctx<'js>,

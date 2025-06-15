@@ -28,11 +28,18 @@ enum ClassId {
 /// # Example
 ///
 /// ```
-/// // Assuming you have a [Value] instance named value containing an i32.
-/// let mut deserializer = Deserializer::from(value);
-///
-/// // Use deserializer to deserialize the JavaScript value into a Rust type.
-/// let number: i32 = serde::Deserialize::deserialize(deserializer)?;
+/// # use rquickjs::{Runtime, Context, Value};
+/// # use rquickjs_serde::Deserializer;
+/// # use serde::Deserializer as _;
+/// #
+/// let rt = Runtime::new().unwrap();
+/// let ctx = Context::full(&rt).unwrap();
+/// ctx.with(|ctx| {
+///     let value = ctx.eval::<Value<'_>, _>("42").unwrap();
+///     let mut deserializer = Deserializer::from(value);
+///     let number: i32 = serde::Deserialize::deserialize(&mut deserializer).unwrap();
+///     assert_eq!(number, 42);
+/// });
 /// ```
 pub struct Deserializer<'js> {
     value: Value<'js>,
