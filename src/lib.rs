@@ -1,3 +1,11 @@
+use rquickjs::{Ctx, Value};
+use serde::Serialize;
+
+#[doc(inline)]
+pub use crate::err::{Error, Result};
+#[doc(inline)]
+pub use crate::ser::Serializer;
+
 pub mod de;
 pub mod err;
 pub mod ser;
@@ -10,6 +18,57 @@ pub const MAX_SAFE_INTEGER: i64 = 2_i64.pow(53) - 1;
 
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MIN_SAFE_INTEGER#description
 pub const MIN_SAFE_INTEGER: i64 = -MAX_SAFE_INTEGER;
+
+/// Convert a `T` into `rquickjs::Value`
+///
+/// # Example
+///
+/// ```
+/// use std::error::Error;
+///
+/// use serde::Serialize;
+/// use rquickjs::{Runtime, Context};
+///
+/// #[derive(Serialize)]
+/// struct User {
+///     fingerprint: String,
+///     location: String,
+/// }
+///
+/// fn serialize_to_value() -> Result<(), Box<dyn Error>> {
+///     let u = User {
+///         fingerprint: "0xF9BA143B95FF6D82".to_owned(),
+///         location: "Menlo Park, CA".to_owned(),
+///     };
+///
+///     let rt = Runtime::new().unwrap();
+///     let ctx = Context::full(&rt).unwrap();
+///
+///     ctx.with(|cx| {
+///         let v = rquickjs_serde::to_value(cx, u).unwrap();
+///         let obj = v.into_object().unwrap();
+///
+///         let fingerprint: String = obj.get("fingerprint").unwrap();
+///         assert_eq!(fingerprint, "0xF9BA143B95FF6D82");
+///
+///         let location: String = obj.get("location").unwrap();
+///         assert_eq!(location, "Menlo Park, CA");
+///     });
+///
+///     Ok(())
+/// }
+/// #
+/// # serialize_to_value().unwrap();
+/// ```
+#[inline]
+pub fn to_value<T>(context: Ctx<'_>, value: T) -> Result<Value<'_>>
+where
+    T: Serialize,
+{
+    let mut serializer = Serializer::from_context(context)?;
+    value.serialize(&mut serializer)?;
+    Ok(serializer.value)
+}
 
 #[cfg(test)]
 mod tests {
