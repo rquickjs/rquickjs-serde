@@ -557,18 +557,20 @@ struct UnitEnumAccess {
 
 impl<'de> de::EnumAccess<'de> for UnitEnumAccess {
     type Error = Error;
-    type Variant = Self;
+    type Variant = UnitOnlyVariant;
 
     fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant)>
     where
         V: de::DeserializeSeed<'de>,
     {
-        let v = seed.deserialize(self.variant.clone().into_deserializer())?;
-        Ok((v, self))
+        let v = seed.deserialize(self.variant.into_deserializer())?;
+        Ok((v, UnitOnlyVariant))
     }
 }
 
-impl<'de> de::VariantAccess<'de> for UnitEnumAccess {
+struct UnitOnlyVariant;
+
+impl<'de> de::VariantAccess<'de> for UnitOnlyVariant {
     type Error = Error;
 
     fn unit_variant(self) -> Result<()> {
