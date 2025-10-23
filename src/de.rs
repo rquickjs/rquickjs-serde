@@ -6,7 +6,7 @@ use rquickjs::{
     qjs::{JS_GetClassID, JS_GetProperty},
 };
 use serde::{
-    de::{self, value::StrDeserializer},
+    de::{self, IntoDeserializer, Unexpected},
     forward_to_deserialize_any,
 };
 
@@ -270,10 +270,9 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         }
 
         // Now require a primitive string.
-        let s = if self.value.is_string() {
-            let js_s = self.value.as_string().unwrap();
-            js_s.to_string()
-                .unwrap_or_else(|e| to_string_lossy(self.value.ctx(), js_s, e))
+        let s = if let Some(s) = self.value.as_string() {
+            s.to_string()
+                .unwrap_or_else(|e| to_string_lossy(self.value.ctx(), s, e))
         } else {
             return Err(Error::new("expected a string for enum unit variant"));
         };
@@ -558,21 +557,18 @@ struct UnitEnumAccess {
 
 impl<'de> de::EnumAccess<'de> for UnitEnumAccess {
     type Error = Error;
-    type Variant = UnitOnlyVariant;
+    type Variant = Self;
 
     fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant)>
     where
         V: de::DeserializeSeed<'de>,
     {
-        let id = StrDeserializer::<Error>::new(&self.variant);
-        let v = seed.deserialize(id)?;
-        Ok((v, UnitOnlyVariant))
+        let v = seed.deserialize(self.variant.clone().into_deserializer())?;
+        Ok((v, self))
     }
 }
 
-struct UnitOnlyVariant;
-
-impl<'de> de::VariantAccess<'de> for UnitOnlyVariant {
+impl<'de> de::VariantAccess<'de> for UnitEnumAccess {
     type Error = Error;
 
     fn unit_variant(self) -> Result<()> {
@@ -583,21 +579,30 @@ impl<'de> de::VariantAccess<'de> for UnitOnlyVariant {
     where
         T: de::DeserializeSeed<'de>,
     {
-        Err(Error::new("only unit variants are supported"))
+        Err(de::Error::invalid_type(
+            Unexpected::NewtypeVariant,
+            &"unit variant",
+        ))
     }
 
     fn tuple_variant<V>(self, _len: usize, _visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
-        Err(Error::new("only unit variants are supported"))
+        Err(de::Error::invalid_type(
+            Unexpected::TupleVariant,
+            &"unit variant",
+        ))
     }
 
     fn struct_variant<V>(self, _fields: &'static [&'static str], _visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
-        Err(Error::new("only unit variants are supported"))
+        Err(de::Error::invalid_type(
+            Unexpected::StructVariant,
+            &"unit variant",
+        ))
     }
 }
 
