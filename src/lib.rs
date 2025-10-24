@@ -403,8 +403,7 @@ mod tests {
             let mut serializer = ValueSerializer::from_context(cx).unwrap();
             expected.serialize(&mut serializer).unwrap();
             let mut deserializer = ValueDeserializer::from(serializer.value);
-            let actual = A::deserialize(&mut deserializer).unwrap();
-            actual
+            A::deserialize(&mut deserializer).unwrap()
         })
     }
 }

@@ -57,8 +57,8 @@ pub enum ErrorImpl {
 impl fmt::Display for ErrorImpl {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ErrorImpl::Message(msg) => write!(f, "{}", msg),
-            ErrorImpl::Rquickjs(e) => write!(f, "{}", e),
+            ErrorImpl::Message(msg) => write!(f, "{msg}"),
+            ErrorImpl::Rquickjs(e) => write!(f, "{e}"),
         }
     }
 }
