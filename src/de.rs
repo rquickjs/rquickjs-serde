@@ -70,19 +70,11 @@ impl<'js> Deserializer<'js> {
     where
         V: de::Visitor<'de>,
     {
-        if self.value.is_int() {
-            return visitor.visit_i32(
-                self.value
-                    .as_int()
-                    .ok_or_else(|| Error::new("Failed to convert value to i32"))?,
-            );
+        if let Some(i) = self.value.as_int() {
+            return visitor.visit_i32(i);
         }
 
-        if self.value.is_float() {
-            let f64_representation = self
-                .value
-                .as_float()
-                .ok_or_else(|| Error::new("Failed to convert value to f64"))?;
+        if let Some(f64_representation) = self.value.as_float() {
             let is_positive = f64_representation.is_sign_positive();
             let safe_integer_range = (MIN_SAFE_INTEGER as f64)..=(MAX_SAFE_INTEGER as f64);
             let whole = f64_representation.fract() == 0.0;
@@ -98,7 +90,11 @@ impl<'js> Deserializer<'js> {
 
             return visitor.visit_f64(f64_representation);
         }
-        unreachable!()
+
+        Err(Error::new(Exception::throw_type(
+            self.value.ctx(),
+            "Unsupported number type",
+        )))
     }
 
     /// Pops the last visited value present in the stack.
@@ -146,8 +142,8 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             }
         }
 
-        if self.value.is_bool() {
-            return visitor.visit_bool(self.value.as_bool().expect("value to be boolean"));
+        if let Some(b) = self.value.as_bool() {
+            return visitor.visit_bool(b);
         }
 
         if get_class_id(&self.value) == ClassId::Bool as u32 {
@@ -188,12 +184,9 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             }
         }
 
-        if self.value.is_array() {
-            let arr = self.value.as_array().unwrap().clone();
-
-            let seq_access = SeqAccess::new(self, arr)?;
-            let result = visitor.visit_seq(seq_access);
-            return result;
+        if let Some(arr) = self.value.as_array() {
+            let seq_access = SeqAccess::new(self, arr.clone())?;
+            return visitor.visit_seq(seq_access);
         }
 
         if self.value.is_object() {
@@ -416,8 +409,8 @@ impl<'a, 'de: 'a> SeqAccess<'a, 'de> {
             .as_object()
             .get(PredefinedAtom::Length)
             .map_err(Error::new)?;
-        let length: usize = if value.is_number() {
-            value.as_number().unwrap() as usize
+        let length: usize = if let Some(n) = value.as_number() {
+            n as usize
         } else {
             let value_of: Function = value
                 .as_object()
@@ -494,8 +487,10 @@ pub(crate) fn get_to_json<'a>(value: &Value<'a>) -> Option<Function<'a>> {
     };
     let f = unsafe { Value::from_raw(value.ctx().clone(), f) };
 
-    if f.is_function() {
-        Some(f.into_function().unwrap())
+    if f.is_function()
+        && let Some(f) = f.into_function()
+    {
+        Some(f)
     } else {
         None
     }
