@@ -45,7 +45,7 @@ enum ClassId {
 /// });
 /// ```
 pub struct Deserializer<'js> {
-    value: Value<'js>,
+    pub value: Value<'js>,
     map_key: bool,
     current_kv: Option<(Value<'js>, Value<'js>)>,
     /// Stack to track circular dependencies.
