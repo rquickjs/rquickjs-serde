@@ -213,14 +213,18 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             return result;
         }
 
-        // FIXME: Replace type_of when https://github.com/DelSkayn/rquickjs/pull/458 is merged.
-        if (get_class_id(&self.value) == ClassId::BigInt as u32
-            || self.value.type_of() == rquickjs::Type::BigInt)
-            && let Some(f) = get_to_json(&self.value)
-        {
-            let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
-            self.value = v;
-            return self.deserialize_any(visitor);
+        if get_class_id(&self.value) == ClassId::BigInt as u32 || self.value.is_big_int() {
+            if let Some(f) = get_to_json(&self.value) {
+                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
+                self.value = v;
+                return self.deserialize_any(visitor);
+            }
+
+            if let Some(f) = get_to_string(&self.value) {
+                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
+                self.value = v;
+                return self.deserialize_any(visitor);
+            }
         }
 
         Err(Error::new(Exception::throw_type(
@@ -482,39 +486,26 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
 
 /// Checks if the value is an object and contains a single `toJSON` function.
 pub(crate) fn get_to_json<'a>(value: &Value<'a>) -> Option<Function<'a>> {
-    let f = unsafe {
-        JS_GetProperty(
-            value.ctx().as_raw().as_ptr(),
-            value.as_raw(),
-            PredefinedAtom::ToJSON as u32,
-        )
-    };
-    let f = unsafe { Value::from_raw(value.ctx().clone(), f) };
-
-    if f.is_function()
-        && let Some(f) = f.into_function()
-    {
-        Some(f)
-    } else {
-        None
-    }
+    get_function(value, PredefinedAtom::ToJSON)
 }
 
 /// Checks if the value is an object and contains a `valueOf` function.
 fn get_valueof<'a>(value: &Value<'a>) -> Option<Function<'a>> {
-    if let Some(o) = value.as_object() {
-        let value_of = o.get("valueOf").ok();
-        value_of.clone()
-    } else {
-        None
-    }
+    get_function(value, PredefinedAtom::ValueOf)
 }
 
-/// Checks if the value is an object and contains a `valueOf` function.
+/// Checks if the value is an object and contains a `toString` function.
 fn get_to_string<'a>(value: &Value<'a>) -> Option<Function<'a>> {
-    if let Some(o) = value.as_object() {
-        let value_of = o.get("toString").ok();
-        value_of.clone()
+    get_function(value, PredefinedAtom::ToString)
+}
+
+fn get_function<'a>(value: &Value<'a>, atom: PredefinedAtom) -> Option<Function<'a>> {
+    let f = unsafe { JS_GetProperty(value.ctx().as_raw().as_ptr(), value.as_raw(), atom as u32) };
+    let f = unsafe { Value::from_raw(value.ctx().clone(), f) };
+    if f.is_function()
+        && let Some(f) = f.into_function()
+    {
+        Some(f)
     } else {
         None
     }
@@ -553,15 +544,18 @@ fn is_array_or_proxy_of_array(val: &Value) -> bool {
     if val.is_array() {
         return true;
     }
-    let ctx = val.ctx().as_raw().as_ptr();
-    let mut val = val.as_raw();
+    let ctx = val.ctx().clone();
+    let mut val = val.clone();
     loop {
-        let is_proxy = unsafe { JS_IsProxy(val) };
+        let is_proxy = unsafe { JS_IsProxy(val.as_raw()) };
         if !is_proxy {
             return false;
         }
-        val = unsafe { JS_GetProxyTarget(ctx, val) };
-        if unsafe { JS_IsArray(val) } {
+        val = unsafe {
+            let target = JS_GetProxyTarget(ctx.as_raw().as_ptr(), val.as_raw());
+            Value::from_raw(ctx.clone(), target)
+        };
+        if unsafe { JS_IsArray(val.as_raw()) } {
             return true;
         }
     }
@@ -652,8 +646,12 @@ mod tests {
     where
         T: DeserializeOwned,
     {
+        let ctx = v.ctx().clone();
         let mut deserializer = ValueDeserializer::from(v);
-        T::deserialize(&mut deserializer).unwrap()
+        match T::deserialize(&mut deserializer) {
+            Ok(val) => val,
+            Err(e) => panic!("{}", e.catch(&ctx)),
+        }
     }
 
     #[test]
@@ -807,6 +805,23 @@ mod tests {
     }
 
     #[test]
+    fn test_array_proxy() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>(
+                r#"
+                var arr = [1, 2, 3];
+                var a = new Proxy(arr, {});
+            "#,
+            )
+            .unwrap();
+            let v = cx.globals().get("a").unwrap();
+            let val = deserialize_value::<Vec<u8>>(v);
+            assert_eq!(vec![1, 2, 3], val);
+        });
+    }
+
+    #[test]
     fn test_non_json_object_values_are_dropped() {
         let rt = Runtime::default();
         rt.context().with(|cx| {
@@ -868,6 +883,35 @@ mod tests {
             let value = to_value(cx, left).unwrap();
             let right: Test = from_value(value).unwrap();
             assert_eq!(left, right);
+        });
+    }
+
+    #[test]
+    fn test_short_bigint() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>("var a = BigInt(1);").unwrap();
+            let v = cx.globals().get("a").unwrap();
+            let val = deserialize_value::<String>(v);
+            assert_eq!(val, "1");
+        });
+    }
+
+    #[test]
+    fn test_bigint() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>(
+                r#"
+                const left = 12345678901234567890n;
+                const right = 98765432109876543210n;
+                var a = left * right;
+            "#,
+            )
+            .unwrap();
+            let v = cx.globals().get("a").unwrap();
+            let val = deserialize_value::<String>(v);
+            assert_eq!(val, "1219326311370217952237463801111263526900");
         });
     }
 }
