@@ -1,9 +1,12 @@
 use rquickjs::{
-    Array, Exception, Filter, Function, Null, Object, String as JSString, Value,
+    Exception, Filter, Function, Null, Object, String as JSString, Value,
     atom::PredefinedAtom,
     function::This,
     object::ObjectIter,
-    qjs::{JS_GetClassID, JS_GetProperty},
+    qjs::{
+        JS_GetClassID, JS_GetProperty, JS_GetPropertyUint32, JS_GetProxyTarget, JS_IsArray,
+        JS_IsProxy, JS_TAG_EXCEPTION, JS_VALUE_GET_NORM_TAG,
+    },
 };
 use serde::{
     de::{self, IntoDeserializer, Unexpected},
@@ -21,7 +24,7 @@ enum ClassId {
     Number = 4,
     String = 5,
     Bool = 6,
-    BigInt = 33,
+    BigInt = 34,
 }
 
 /// `Deserializer` is a deserializer for [Value] values, implementing the `serde::Deserializer` trait.
@@ -184,8 +187,10 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             }
         }
 
-        if let Some(arr) = self.value.as_array() {
-            let seq_access = SeqAccess::new(self, arr.clone())?;
+        if is_array_or_proxy_of_array(&self.value)
+            && let Some(seq) = self.value.as_object()
+        {
+            let seq_access = SeqAccess::new(self, seq.clone())?;
             return visitor.visit_seq(seq_access);
         }
 
@@ -387,8 +392,10 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
 struct SeqAccess<'a, 'de: 'a> {
     /// The deserializer.
     de: &'a mut Deserializer<'de>,
-    /// The sequence, represented as a JavaScript array.
-    seq: Array<'de>,
+    /// The sequence, represented as a JavaScript object.
+    // Using Object instead of Array because `SeqAccess` needs to support
+    // proxies of arrays and a proxy Value cannot be converted into Array.
+    seq: Object<'de>,
     /// The sequence length.
     length: usize,
     /// The current index.
@@ -398,17 +405,14 @@ struct SeqAccess<'a, 'de: 'a> {
 impl<'a, 'de: 'a> SeqAccess<'a, 'de> {
     /// Creates a new `SeqAccess` ensuring that the top-level value is added
     /// to the `Deserializer` visitor stack.
-    fn new(de: &'a mut Deserializer<'de>, seq: Array<'de>) -> Result<Self> {
+    fn new(de: &'a mut Deserializer<'de>, seq: Object<'de>) -> Result<Self> {
         de.stack.push(seq.clone().into_value());
 
         // Retrieve the `length` property from the object itself rather than
         // using the bindings `Array::len` given that according to the spec
         // it's fine to return any value, not just a number from the
         // `length` property.
-        let value: Value = seq
-            .as_object()
-            .get(PredefinedAtom::Length)
-            .map_err(Error::new)?;
+        let value: Value = seq.get(PredefinedAtom::Length).map_err(Error::new)?;
         let length: usize = if let Some(n) = value.as_number() {
             n as usize
         } else {
@@ -450,7 +454,7 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
         T: de::DeserializeSeed<'de>,
     {
         if self.index < self.length {
-            let el = self.seq.get(self.index).map_err(Error::new)?;
+            let el = get_index(&self.seq, self.index).map_err(Error::new)?;
             let to_json = get_to_json(&el);
 
             if let Some(f) = to_json {
@@ -543,6 +547,35 @@ fn ensure_supported(value: &Value<'_>) -> Result<bool> {
             | rquickjs::Type::Uninitialized
             | rquickjs::Type::Constructor
     ))
+}
+
+fn is_array_or_proxy_of_array(val: &Value) -> bool {
+    if val.is_array() {
+        return true;
+    }
+    let ctx = val.ctx().as_raw().as_ptr();
+    let mut val = val.as_raw();
+    loop {
+        let is_proxy = unsafe { JS_IsProxy(val) };
+        if !is_proxy {
+            return false;
+        }
+        val = unsafe { JS_GetProxyTarget(ctx, val) };
+        if unsafe { JS_IsArray(val) } {
+            return true;
+        }
+    }
+}
+
+fn get_index<'a>(obj: &Object<'a>, idx: usize) -> rquickjs::Result<Value<'a>> {
+    unsafe {
+        let ctx = obj.ctx();
+        let val = JS_GetPropertyUint32(ctx.as_raw().as_ptr(), obj.as_raw(), idx as _);
+        if JS_VALUE_GET_NORM_TAG(val) == JS_TAG_EXCEPTION {
+            return Err(rquickjs::Error::Exception);
+        }
+        Ok(Value::from_raw(ctx.clone(), val))
+    }
 }
 
 /// A helper struct for deserializing enums containing unit variants.
