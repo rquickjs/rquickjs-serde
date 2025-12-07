@@ -51,6 +51,16 @@ fn main() {
 }
 ```
 
+## Strict mode
+
+The implementation tries to make smart guesses when it can, for example the deserializer will fallback to converting `BigInt` to `String`. This is likely not what you want if you implement a serialization that is JSON compliant.
+
+This is s why we offer the `strict` mode, that will stick to what the behaviour that the Javascript specification defines for `JSON`. Just switch the method to use it.
+
+```rust
+let u: User = rquickjs_serde::from_value_strict(val).unwrap();
+```
+
 ## Acknowledgements
 
 This project includes code derived from the [Javy](https://github.com/bytecodealliance/javy) project. See [`NOTICE`](./NOTICE) for more details.

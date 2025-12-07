@@ -82,7 +82,9 @@ impl fmt::Display for ErrorImpl {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ErrorImpl::Message(msg) => write!(f, "{msg}"),
-            ErrorImpl::Rquickjs(e) => write!(f, "{e}"),
+            // JSError prefix is used by Javy because the serde_transcode.
+            // Keep it as-is for compatibility.
+            ErrorImpl::Rquickjs(e) => write!(f, "JSError: {e}"),
         }
     }
 }

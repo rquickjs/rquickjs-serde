@@ -48,17 +48,33 @@ enum ClassId {
 /// });
 /// ```
 pub struct Deserializer<'js> {
-    pub value: Value<'js>,
+    value: Value<'js>,
+    /// In strict mode, only JSON-able values are allowed.
+    strict: bool,
     map_key: bool,
     current_kv: Option<(Value<'js>, Value<'js>)>,
     /// Stack to track circular dependencies.
     stack: Vec<Value<'js>>,
 }
 
+impl<'js> Deserializer<'js> {
+    pub fn new(value: Value<'js>) -> Self {
+        Self::from(value)
+    }
+
+    pub fn with_strict(self) -> Self {
+        Self {
+            strict: true,
+            ..self
+        }
+    }
+}
+
 impl<'de> From<Value<'de>> for Deserializer<'de> {
     fn from(value: Value<'de>) -> Self {
         Self {
             value,
+            strict: false,
             map_key: false,
             current_kv: None,
             // We are probaby over allocating here. But it's probably fine to
@@ -220,7 +236,9 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
                 return self.deserialize_any(visitor);
             }
 
-            if let Some(f) = get_to_string(&self.value) {
+            if let Some(f) = get_to_string(&self.value)
+                && !self.strict
+            {
                 let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
                 self.value = v;
                 return self.deserialize_any(visitor);

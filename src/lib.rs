@@ -127,6 +127,19 @@ where
     T::deserialize(&mut deserializer)
 }
 
+/// Interpret a `rquickjs::Value` as an instance of type `T` in strict mode.
+///
+/// Strict mode will stick to the behaviour of JSON.stringify.
+///
+/// See [from_value] for more information about the deserialization.
+pub fn from_value_strict<T>(value: Value) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let mut deserializer = Deserializer::from(value).with_strict();
+    T::deserialize(&mut deserializer)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
