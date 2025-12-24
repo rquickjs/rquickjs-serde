@@ -4,8 +4,8 @@ use rquickjs::{
     function::This,
     object::ObjectIter,
     qjs::{
-        JS_GetClassID, JS_GetProperty, JS_GetPropertyUint32, JS_GetProxyTarget, JS_IsArray,
-        JS_IsProxy, JS_TAG_EXCEPTION, JS_VALUE_GET_NORM_TAG,
+        JS_GetClassID, JS_GetProperty, JS_GetPropertyUint32, JS_TAG_EXCEPTION,
+        JS_VALUE_GET_NORM_TAG,
     },
 };
 use serde::{
@@ -562,18 +562,16 @@ fn is_array_or_proxy_of_array(val: &Value) -> bool {
     if val.is_array() {
         return true;
     }
-    let ctx = val.ctx().clone();
     let mut val = val.clone();
     loop {
-        let is_proxy = unsafe { JS_IsProxy(val.as_raw()) };
-        if !is_proxy {
+        let Some(proxy) = val.into_proxy() else {
             return false;
-        }
-        val = unsafe {
-            let target = JS_GetProxyTarget(ctx.as_raw().as_ptr(), val.as_raw());
-            Value::from_raw(ctx.clone(), target)
         };
-        if unsafe { JS_IsArray(val.as_raw()) } {
+        let Ok(target) = proxy.target() else {
+            return false;
+        };
+        val = target.into_value();
+        if val.is_array() {
             return true;
         }
     }
