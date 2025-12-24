@@ -24,7 +24,7 @@ enum ClassId {
     Number = 4,
     String = 5,
     Bool = 6,
-    BigInt = 34,
+    BigInt = 35,
 }
 
 /// `Deserializer` is a deserializer for [Value] values, implementing the `serde::Deserializer` trait.
