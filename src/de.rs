@@ -1,3 +1,6 @@
+use alloc::string::{String, ToString as _};
+use alloc::vec::Vec;
+
 use rquickjs::{
     Exception, Filter, Function, Null, Object, String as JSString, Value,
     atom::PredefinedAtom,
@@ -96,7 +99,7 @@ impl<'js> Deserializer<'js> {
         if let Some(f64_representation) = self.value.as_float() {
             let is_positive = f64_representation.is_sign_positive();
             let safe_integer_range = (MIN_SAFE_INTEGER as f64)..=(MAX_SAFE_INTEGER as f64);
-            let whole = f64_representation.fract() == 0.0;
+            let whole = (f64_representation % 1.0) == 0.0;
 
             if whole && is_positive && f64_representation <= u32::MAX as f64 {
                 return visitor.visit_u32(f64_representation as u32);

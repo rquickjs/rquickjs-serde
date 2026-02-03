@@ -1,3 +1,7 @@
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
 use rquickjs::{Ctx, Value};
 use serde::Serialize;
 use serde::de::DeserializeOwned;

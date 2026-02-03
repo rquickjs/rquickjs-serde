@@ -1,4 +1,5 @@
-use std::str;
+use alloc::string::String;
+use core::str;
 
 use rquickjs::{Ctx, Error as JSError, String as JSString, Value, qjs};
 
@@ -29,7 +30,7 @@ pub fn to_string_lossy<'js>(cx: &Ctx<'js>, string: &JSString<'js>, error: JSErro
             (false).into(),
         )
     };
-    let buffer = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let buffer = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
 
     // The error here *must* be a Utf8 error; the `JSString::to_string()` may
     // return `JSError::Unknown`, but at that point, something else has gone

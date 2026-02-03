@@ -1,4 +1,6 @@
-use std::{error, fmt};
+use alloc::boxed::Box;
+use alloc::string::{String, ToString as _};
+use core::{error, fmt};
 
 use rquickjs::{Ctx, Error as JSError, Exception, Value};
 use serde::{de, ser};
@@ -18,7 +20,7 @@ impl Error {
 }
 
 /// Alias for a `Result` with the error type `rquickjs_serde::Error`.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

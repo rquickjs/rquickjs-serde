@@ -1,3 +1,5 @@
+use alloc::string::ToString as _;
+
 use rquickjs::{Array, Ctx, Object, String as JSString, Value, object::Property};
 use serde::{Serialize, ser};
 
