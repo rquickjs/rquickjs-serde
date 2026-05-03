@@ -12,7 +12,7 @@ use rquickjs::{
     },
 };
 use serde::{
-    de::{self, IntoDeserializer, Unexpected},
+    de::{self, IntoDeserializer},
     forward_to_deserialize_any,
 };
 
@@ -292,6 +292,21 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             self.value = v;
         }
 
+        if let Some(obj) = self.value.as_object() {
+            if let Ok((variant, value)) = obj
+                .props::<String, Value>()
+                .next()
+                .ok_or_else(|| Error::new("expected enum object with one key"))?
+            {
+                return visitor.visit_enum(EnumAccessImpl {
+                    variant,
+                    value: Some(value.clone()),
+                });
+            }
+        }
+
+        //if let Some(obj) = self.value.as_object()
+
         // Now require a primitive string.
         let s = if let Some(s) = self.value.as_string() {
             s.to_string()
@@ -301,7 +316,10 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         };
 
         // Hand Serde an EnumAccess that only supports unit variants.
-        visitor.visit_enum(UnitEnumAccess { variant: s })
+        visitor.visit_enum(EnumAccessImpl {
+            variant: s,
+            value: None,
+        })
     }
 
     forward_to_deserialize_any! {
@@ -592,60 +610,69 @@ fn get_index<'a>(obj: &Object<'a>, idx: usize) -> rquickjs::Result<Value<'a>> {
 }
 
 /// A helper struct for deserializing enums containing unit variants.
-struct UnitEnumAccess {
+struct EnumAccessImpl<'de> {
     variant: String,
+    value: Option<Value<'de>>,
 }
 
-impl<'de> de::EnumAccess<'de> for UnitEnumAccess {
+impl<'de> de::EnumAccess<'de> for EnumAccessImpl<'de> {
     type Error = Error;
-    type Variant = UnitOnlyVariant;
+    type Variant = VariantAccessImpl<'de>;
 
     fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant)>
     where
         V: de::DeserializeSeed<'de>,
     {
-        let v = seed.deserialize(self.variant.into_deserializer())?;
-        Ok((v, UnitOnlyVariant))
+        let val = seed.deserialize(self.variant.into_deserializer())?;
+        Ok((val, VariantAccessImpl { value: self.value }))
     }
 }
 
-struct UnitOnlyVariant;
+struct VariantAccessImpl<'de> {
+    value: Option<Value<'de>>,
+}
 
-impl<'de> de::VariantAccess<'de> for UnitOnlyVariant {
+impl<'de> de::VariantAccess<'de> for VariantAccessImpl<'de> {
     type Error = Error;
 
     fn unit_variant(self) -> Result<()> {
-        Ok(())
+        match self.value {
+            None => Ok(()),
+            Some(_) => Err(Error::new("expected unit variant")),
+        }
     }
 
-    fn newtype_variant_seed<T>(self, _seed: T) -> Result<T::Value>
+    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value>
     where
         T: de::DeserializeSeed<'de>,
     {
-        Err(de::Error::invalid_type(
-            Unexpected::NewtypeVariant,
-            &"unit variant",
-        ))
+        let value = self
+            .value
+            .ok_or_else(|| Error::new("expected value for newtype variant"))?;
+
+        seed.deserialize(&mut Deserializer::from(value))
     }
 
-    fn tuple_variant<V>(self, _len: usize, _visitor: V) -> Result<V::Value>
+    fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
-        Err(de::Error::invalid_type(
-            Unexpected::TupleVariant,
-            &"unit variant",
-        ))
+        let value = self
+            .value
+            .ok_or_else(|| Error::new("expected tuple variant"))?;
+
+        de::Deserializer::deserialize_seq(&mut Deserializer::from(value), visitor)
     }
 
-    fn struct_variant<V>(self, _fields: &'static [&'static str], _visitor: V) -> Result<V::Value>
+    fn struct_variant<V>(self, _fields: &'static [&'static str], visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
-        Err(de::Error::invalid_type(
-            Unexpected::StructVariant,
-            &"unit variant",
-        ))
+        let value = self
+            .value
+            .ok_or_else(|| Error::new("expected struct variant"))?;
+
+        de::Deserializer::deserialize_map(&mut Deserializer::from(value), visitor)
     }
 }
 
@@ -887,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enum() {
+    fn test_enum_unit() {
         let rt = Runtime::default();
 
         #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -899,6 +926,59 @@ mod tests {
 
         rt.context().with(|cx| {
             let left = Test::Two;
+            let value = to_value(cx, left).unwrap();
+            let right: Test = from_value(value).unwrap();
+            assert_eq!(left, right);
+        });
+    }
+
+    #[test]
+    fn test_enum_newtype() {
+        let rt = Runtime::default();
+
+        #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+        enum Test {
+            One(i32),
+            Two(i32),
+        }
+
+        rt.context().with(|cx| {
+            let left = Test::One(6);
+            let value = to_value(cx, left).unwrap();
+            let right: Test = from_value(value).unwrap();
+            assert_eq!(left, right);
+        });
+    }
+
+    #[test]
+    fn test_enum_struct() {
+        let rt = Runtime::default();
+
+        #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+        enum Test {
+            One { a: i32 },
+            Two(i32),
+        }
+
+        rt.context().with(|cx| {
+            let left = Test::One { a: 6 };
+            let value = to_value(cx, left).unwrap();
+            let right: Test = from_value(value).unwrap();
+            assert_eq!(left, right);
+        });
+    }
+
+    #[test]
+    fn test_enum_tuple() {
+        let rt = Runtime::default();
+
+        #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+        enum Test {
+            One(i32, i32),
+        }
+
+        rt.context().with(|cx| {
+            let left = Test::One(1, 2);
             let value = to_value(cx, left).unwrap();
             let right: Test = from_value(value).unwrap();
             assert_eq!(left, right);
