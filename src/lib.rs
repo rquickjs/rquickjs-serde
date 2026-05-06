@@ -73,7 +73,7 @@ where
     T: Serialize,
 {
     let mut serializer = Serializer::from_context(context)?;
-    Ok(value.serialize(&mut serializer)?)
+    value.serialize(&mut serializer)
 }
 
 /// Interpret a `rquickjs::Value` as an instance of type `T`.

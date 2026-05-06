@@ -293,33 +293,29 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         }
 
         if let Some(obj) = self.value.as_object() {
-            if let Ok((variant, value)) = obj
+            let (variant, value): (String, Value<'de>) = obj
                 .props::<String, Value>()
                 .next()
                 .ok_or_else(|| Error::new("expected enum object with one key"))?
-            {
-                return visitor.visit_enum(EnumAccessImpl {
-                    variant,
-                    value: Some(value.clone()),
-                });
-            }
-        }
+                .map_err(Error::new)?;
 
-        //if let Some(obj) = self.value.as_object()
+            visitor.visit_enum(EnumAccessImpl {
+                variant,
+                value: Some(value.clone()),
+            })
+        } else if let Some(s) = self.value.as_string() {
+            // Now require a primitive string.
+            let s = s
+                .to_string()
+                .unwrap_or_else(|e| to_string_lossy(self.value.ctx(), s, e));
 
-        // Now require a primitive string.
-        let s = if let Some(s) = self.value.as_string() {
-            s.to_string()
-                .unwrap_or_else(|e| to_string_lossy(self.value.ctx(), s, e))
+            visitor.visit_enum(EnumAccessImpl {
+                variant: s,
+                value: None,
+            })
         } else {
-            return Err(Error::new("expected a string for enum unit variant"));
-        };
-
-        // Hand Serde an EnumAccess that only supports unit variants.
-        visitor.visit_enum(EnumAccessImpl {
-            variant: s,
-            value: None,
-        })
+            Err(Error::new("expected a string or object for enum"))
+        }
     }
 
     forward_to_deserialize_any! {
