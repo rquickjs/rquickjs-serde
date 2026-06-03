@@ -605,9 +605,11 @@ fn get_index<'a>(obj: &Object<'a>, idx: usize) -> rquickjs::Result<Value<'a>> {
     }
 }
 
-/// A helper struct for deserializing enums containing unit variants.
+/// A helper struct for deserializing enums
 struct EnumAccessImpl<'de> {
+    /// selected enum variant
     variant: String,
+    /// value of selected variant, `None` for unit variant
     value: Option<Value<'de>>,
 }
 
