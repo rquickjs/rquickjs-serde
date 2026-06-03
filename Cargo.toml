@@ -9,7 +9,7 @@ readme = "README.md"
 authors = ["Emile Fugulin <code@efugulin.com>", "The Javy Project Developers"]
 
 [dependencies]
-rquickjs = { version = "0.11", default-features = false }
+rquickjs = { version = "0.12", default-features = false }
 serde = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
