@@ -1,6 +1,6 @@
 use alloc::string::ToString as _;
 
-use rquickjs::{Array, Ctx, Object, String as JSString, Value};
+use rquickjs::{Array, Ctx, Object, String as JSString, Value, object::Property};
 use serde::{Serialize, ser};
 
 use crate::err::{Error, Result};
@@ -367,7 +367,8 @@ impl<'se, 'js> ser::SerializeMap for MapSerializer<'se, 'js> {
             .ok_or_else(|| Error::new("serialize_value before serialize_key"))?;
 
         let value = value.serialize(&mut *self.ser)?;
-        self.value.set(key, value).map_err(Error::new)
+        let prop = Property::from(value).writable().configurable().enumerable();
+        self.value.prop::<_, _, _>(key, prop).map_err(Error::new)
     }
 
     fn end(self) -> Result<Self::Ok> {
@@ -642,6 +643,22 @@ mod tests {
     }
 
     #[test]
+    fn test_map_proto_key_is_own_data_property() {
+        let rt = Runtime::default();
+
+        rt.context().with(|cx| {
+            let mut serializer = ValueSerializer::from_context(cx.clone()).unwrap();
+
+            let mut map = BTreeMap::new();
+            map.insert("__proto__", "bar");
+
+            let value = map.serialize(&mut serializer).unwrap();
+
+            assert_has_own_proto_data_property(cx, value, "'bar'");
+        });
+    }
+
+    #[test]
     fn test_struct_into_map() {
         let rt = Runtime::default();
 
@@ -754,6 +771,20 @@ mod tests {
 
             assert_eq!(r#"{"One":[1,2]}"#, json_stringify(cx.clone(), value));
         });
+    }
+
+    fn assert_has_own_proto_data_property<'js>(
+        cx: Ctx<'js>,
+        value: Value<'js>,
+        expected_value_source: &str,
+    ) {
+        cx.globals().set("__rquickjs_serde_value", value).unwrap();
+        let assertion = format!(
+            "Object.getPrototypeOf(__rquickjs_serde_value) === Object.prototype && \
+             Object.prototype.hasOwnProperty.call(__rquickjs_serde_value, '__proto__') && \
+             Object.getOwnPropertyDescriptor(__rquickjs_serde_value, '__proto__').value === {expected_value_source}"
+        );
+        assert!(cx.eval::<bool, _>(assertion.as_str()).unwrap());
     }
 
     fn json_stringify<'js>(cx: Ctx<'js>, value: Value<'js>) -> String {
