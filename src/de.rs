@@ -188,8 +188,8 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         }
 
         if get_class_id(&self.value) == ClassId::String {
-            let value_of = get_to_string(&self.value);
-            if let Some(f) = value_of {
+            let to_string = get_to_string(&self.value);
+            if let Some(f) = to_string {
                 let v = f.call(((This(self.value.clone())),)).map_err(Error::new)?;
                 self.value = v;
             }
