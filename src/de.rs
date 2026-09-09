@@ -23,11 +23,18 @@ use crate::{MAX_SAFE_INTEGER, MIN_SAFE_INTEGER};
 // Class IDs, for internal, deserialization purposes only.
 // FIXME: This can change since the ABI is not stable.
 // See https://github.com/quickjs-ng/quickjs/issues/758
+#[derive(Debug, Copy, Clone)]
 enum ClassId {
     Number = 4,
     String = 5,
     Bool = 6,
     BigInt = 35,
+}
+
+impl PartialEq<ClassId> for u32 {
+    fn eq(&self, other: &ClassId) -> bool {
+        *self == *other as u32
+    }
 }
 
 /// `Deserializer` is a deserializer for [Value] values, implementing the `serde::Deserializer` trait.
@@ -155,7 +162,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             return self.deserialize_number(visitor);
         }
 
-        if get_class_id(&self.value) == ClassId::Number as u32 {
+        if get_class_id(&self.value) == ClassId::Number {
             let value_of = get_valueof(&self.value);
             if let Some(f) = value_of {
                 let v = f.call((This(self.value.clone()),)).map_err(Error::new)?;
@@ -168,7 +175,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             return visitor.visit_bool(b);
         }
 
-        if get_class_id(&self.value) == ClassId::Bool as u32 {
+        if get_class_id(&self.value) == ClassId::Bool {
             let value_of = get_valueof(&self.value);
             if let Some(f) = value_of {
                 let v = f.call((This(self.value.clone()),)).map_err(Error::new)?;
@@ -180,7 +187,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             return visitor.visit_unit();
         }
 
-        if get_class_id(&self.value) == ClassId::String as u32 {
+        if get_class_id(&self.value) == ClassId::String {
             let value_of = get_to_string(&self.value);
             if let Some(f) = value_of {
                 let v = f.call(((This(self.value.clone())),)).map_err(Error::new)?;
@@ -213,6 +220,22 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             return visitor.visit_seq(seq_access);
         }
 
+        if get_class_id(&self.value) == ClassId::BigInt || self.value.is_big_int() {
+            if let Some(f) = get_to_json(&self.value) {
+                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
+                self.value = v;
+                return self.deserialize_any(visitor);
+            }
+
+            if let Some(f) = get_to_string(&self.value)
+                && !self.strict
+            {
+                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
+                self.value = v;
+                return self.deserialize_any(visitor);
+            }
+        }
+
         if self.value.is_object() {
             ensure_supported(&self.value)?;
 
@@ -230,22 +253,6 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             let map_access = MapAccess::new(self, self.value.clone().into_object().unwrap())?;
             let result = visitor.visit_map(map_access);
             return result;
-        }
-
-        if get_class_id(&self.value) == ClassId::BigInt as u32 || self.value.is_big_int() {
-            if let Some(f) = get_to_json(&self.value) {
-                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
-                self.value = v;
-                return self.deserialize_any(visitor);
-            }
-
-            if let Some(f) = get_to_string(&self.value)
-                && !self.strict
-            {
-                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
-                self.value = v;
-                return self.deserialize_any(visitor);
-            }
         }
 
         Err(Error::new(Exception::throw_type(
@@ -285,7 +292,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        if get_class_id(&self.value) == ClassId::String as u32
+        if get_class_id(&self.value) == ClassId::String
             && let Some(f) = get_to_string(&self.value)
         {
             let v = f.call((This(self.value.clone()),)).map_err(Error::new)?;
@@ -391,13 +398,13 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
 
                 let class_id = get_class_id(&v);
 
-                if class_id == ClassId::Bool as u32 || class_id == ClassId::Number as u32 {
+                if class_id == ClassId::Bool || class_id == ClassId::Number {
                     let value_of = get_valueof(&v);
                     if let Some(f) = value_of {
                         let v = f.call((This(v.clone()),)).map_err(Error::new)?;
                         self.de.current_kv = Some((k.clone(), v));
                     }
-                } else if class_id == ClassId::String as u32 {
+                } else if class_id == ClassId::String {
                     let to_string = get_to_string(&v);
                     if let Some(f) = to_string {
                         let v = f.call((This(v.clone()),)).map_err(Error::new)?;
@@ -554,11 +561,11 @@ fn get_class_id(v: &Value) -> u32 {
 /// Ensures that the value can be stringified.
 fn ensure_supported(value: &Value<'_>) -> Result<bool> {
     let class_id = get_class_id(value);
-    if class_id == (ClassId::Bool as u32) || class_id == (ClassId::Number as u32) {
+    if class_id == ClassId::Bool || class_id == ClassId::Number {
         return Ok(true);
     }
 
-    if class_id == ClassId::BigInt as u32 {
+    if class_id == ClassId::BigInt {
         return Err(Error::new(Exception::throw_type(
             value.ctx(),
             "BigInt not supported",
@@ -682,7 +689,7 @@ mod tests {
     use serde::de::DeserializeOwned;
     use serde::{Deserialize, Serialize};
 
-    use super::Deserializer as ValueDeserializer;
+    use super::{ClassId, Deserializer as ValueDeserializer, get_class_id};
     use crate::test::Runtime;
     use crate::{MAX_SAFE_INTEGER, from_value, to_value};
 
@@ -713,6 +720,47 @@ mod tests {
         rt.context().with(|cx| {
             let val = Value::new_undefined(cx);
             deserialize_value::<()>(val);
+        });
+    }
+
+    #[test]
+    fn test_boxed_boolean() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>("var a = new Boolean(true);")
+                .unwrap();
+            let v = cx.globals().get("a").unwrap();
+            assert!(deserialize_value::<bool>(v));
+
+            cx.eval::<Value<'_>, _>("var b = new Boolean(false);")
+                .unwrap();
+            let v = cx.globals().get("b").unwrap();
+            assert!(!deserialize_value::<bool>(v));
+        });
+    }
+
+    #[test]
+    fn test_boxed_number() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>("var a = new Number(42);").unwrap();
+            let v = cx.globals().get("a").unwrap();
+            assert_eq!(42, deserialize_value::<i32>(v));
+
+            cx.eval::<Value<'_>, _>("var b = new Number(1.5);").unwrap();
+            let v = cx.globals().get("b").unwrap();
+            assert_eq!(1.5, deserialize_value::<f64>(v));
+        });
+    }
+
+    #[test]
+    fn test_boxed_string() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>("var a = new String('hello');")
+                .unwrap();
+            let v = cx.globals().get("a").unwrap();
+            assert_eq!("hello", deserialize_value::<String>(v));
         });
     }
 
@@ -758,6 +806,39 @@ mod tests {
             let actual = deserialize_value::<BTreeMap<String, i32>>(val);
 
             assert_eq!(42, *actual.get("1337").unwrap())
+        });
+    }
+
+    #[test]
+    fn test_map_with_boxed_primitives() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Boxed {
+            b: bool,
+            n: i32,
+            s: String,
+        }
+
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>(
+                r#"
+                var a = {
+                    b: new Boolean(true),
+                    n: new Number(42),
+                    s: new String("hello"),
+                };
+                "#,
+            )
+            .unwrap();
+            let v = cx.globals().get("a").unwrap();
+            assert_eq!(
+                Boxed {
+                    b: true,
+                    n: 42,
+                    s: "hello".to_string(),
+                },
+                deserialize_value::<Boxed>(v)
+            );
         });
     }
 
@@ -849,6 +930,24 @@ mod tests {
     }
 
     #[test]
+    fn test_array_with_boxed_primitives() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>(
+                r#"
+                var a = [new Boolean(false), new Number(7), new String("x")];
+                "#,
+            )
+            .unwrap();
+            let v = cx.globals().get("a").unwrap();
+            assert_eq!(
+                (false, 7, "x".to_string()),
+                deserialize_value::<(bool, i32, String)>(v)
+            );
+        });
+    }
+
+    #[test]
     fn test_array_proxy() {
         let rt = Runtime::default();
         rt.context().with(|cx| {
@@ -931,6 +1030,23 @@ mod tests {
     }
 
     #[test]
+    fn test_enum_boxed_string() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        enum Test {
+            One,
+            Two,
+        }
+
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>("var a = new String('Two');")
+                .unwrap();
+            let v = cx.globals().get("a").unwrap();
+            assert_eq!(Test::Two, deserialize_value::<Test>(v));
+        });
+    }
+
+    #[test]
     fn test_enum_newtype() {
         let rt = Runtime::default();
 
@@ -995,6 +1111,17 @@ mod tests {
     }
 
     #[test]
+    fn test_boxed_bigint() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<Value<'_>, _>("var a = Object(1n);").unwrap();
+            let v = cx.globals().get("a").unwrap();
+            let val = deserialize_value::<String>(v);
+            assert_eq!(val, "1");
+        });
+    }
+
+    #[test]
     fn test_bigint() {
         let rt = Runtime::default();
         rt.context().with(|cx| {
@@ -1009,6 +1136,24 @@ mod tests {
             let v = cx.globals().get("a").unwrap();
             let val = deserialize_value::<String>(v);
             assert_eq!(val, "1219326311370217952237463801111263526900");
+        });
+    }
+
+    #[test]
+    fn test_class_ids_have_not_changed() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            let cases = [
+                ("new Number(1)", ClassId::Number),
+                ("new String('x')", ClassId::String),
+                ("new Boolean(true)", ClassId::Bool),
+                ("Object(1n)", ClassId::BigInt),
+            ];
+
+            for (expr, expected) in cases {
+                let val = cx.eval::<Value<'_>, _>(expr).unwrap();
+                assert_eq!(get_class_id(&val), expected, "{expr} class id changed");
+            }
         });
     }
 }
