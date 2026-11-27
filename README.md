@@ -72,6 +72,17 @@ let mut deserializer = rquickjs_serde::Deserializer::new(val).without_to_json();
 let u = User::deserialize(&mut deserializer)?;
 ```
 
+## Recursion limit
+
+Deserialization defaults to a maximum recursion depth of 128. Override it with `Deserializer::with_recursion_limit()`:
+
+```rust
+use serde::Deserialize;
+
+let mut deserializer = rquickjs_serde::Deserializer::new(val).with_recursion_limit(256);
+let u = User::deserialize(&mut deserializer)?;
+```
+
 ## Acknowledgements
 
 This project includes code derived from the [Javy](https://github.com/bytecodealliance/javy) project. See [`NOTICE`](./NOTICE) for more details.

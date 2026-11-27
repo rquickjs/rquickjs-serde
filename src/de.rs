@@ -65,6 +65,7 @@ pub struct Deserializer<'js> {
     /// Whether `toJSON` has been applied at the current value's position.
     to_json_applied: bool,
     use_to_json: bool,
+    remaining_recursion: usize,
     current_kv: Option<(Value<'js>, Value<'js>)>,
     /// Stack to track circular dependencies.
     stack: Vec<Value<'js>>,
@@ -73,6 +74,21 @@ pub struct Deserializer<'js> {
 impl<'js> Deserializer<'js> {
     pub fn new(value: Value<'js>) -> Self {
         Self::from(value)
+    }
+
+    /// Sets the maximum recursion depth, which defaults to 128.
+    ///
+    /// Entering an array, object, object-form enum, or recursive conversion
+    /// consumes one level. A limit of zero allows only non-recursive values.
+    /// Increasing the limit may cause a native stack overflow. This does not
+    /// limit JavaScript execution inside getters or conversion hooks.
+    ///
+    /// Defaults to 128.
+    pub fn with_recursion_limit(self, limit: usize) -> Self {
+        Self {
+            remaining_recursion: limit,
+            ..self
+        }
     }
 
     /// Disables `toJSON` lookups and calls, including for nested values.
@@ -106,6 +122,7 @@ impl<'de> From<Value<'de>> for Deserializer<'de> {
             map_key: false,
             to_json_applied: false,
             use_to_json: true,
+            remaining_recursion: 128,
             current_kv: None,
             // We are probaby over allocating here. But it's probably fine to
             // over allocate to avoid paying the cost of subsequent allocations.
@@ -115,6 +132,19 @@ impl<'de> From<Value<'de>> for Deserializer<'de> {
 }
 
 impl<'js> Deserializer<'js> {
+    fn with_recursion<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.remaining_recursion == 0 {
+            return Err(Error::new(Exception::throw_range(
+                self.value.ctx(),
+                "Recursion limit exceeded",
+            )));
+        }
+        self.remaining_recursion -= 1;
+        let result = f(self);
+        self.remaining_recursion += 1;
+        result
+    }
+
     fn apply_to_json(&mut self) -> Result<()> {
         if self.use_to_json && !self.map_key && !self.to_json_applied {
             // Property and array access apply the hook with their own key before
@@ -250,10 +280,12 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         }
 
         if is_array_or_proxy_of_array(&self.value)
-            && let Some(seq) = self.value.as_object()
+            && let Some(seq) = self.value.as_object().cloned()
         {
-            let seq_access = SeqAccess::new(self, seq.clone())?;
-            return visitor.visit_seq(seq_access);
+            return self.with_recursion(|de| {
+                let seq_access = SeqAccess::new(de, seq)?;
+                visitor.visit_seq(seq_access)
+            });
         }
 
         if (get_class_id(&self.value) == ClassId::BigInt || self.value.is_big_int())
@@ -262,15 +294,16 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         {
             let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
             self.value = v;
-            return self.deserialize_any(visitor);
+            return self.with_recursion(|de| de.deserialize_any(visitor));
         }
 
         if self.value.is_object() {
             ensure_supported(&self.value)?;
 
-            let map_access = MapAccess::new(self, self.value.clone().into_object().unwrap())?;
-            let result = visitor.visit_map(map_access);
-            return result;
+            return self.with_recursion(|de| {
+                let map_access = MapAccess::new(de, de.value.clone().into_object().unwrap())?;
+                visitor.visit_map(map_access)
+            });
         }
 
         Err(Error::new(Exception::throw_type(
@@ -328,10 +361,13 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
                 .ok_or_else(|| Error::new("expected enum object with one key"))?
                 .map_err(Error::new)?;
 
-            visitor.visit_enum(EnumAccessImpl {
-                variant,
-                value: Some(value.clone()),
-                use_to_json: self.use_to_json,
+            self.with_recursion(|de| {
+                visitor.visit_enum(EnumAccessImpl {
+                    variant,
+                    value: Some(value.clone()),
+                    use_to_json: de.use_to_json,
+                    remaining_recursion: de.remaining_recursion,
+                })
             })
         } else if let Some(s) = self.value.as_string() {
             // Now require a primitive string.
@@ -343,6 +379,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
                 variant: s,
                 value: None,
                 use_to_json: self.use_to_json,
+                remaining_recursion: self.remaining_recursion,
             })
         } else {
             Err(Error::new("expected a string or object for enum"))
@@ -645,6 +682,7 @@ struct EnumAccessImpl<'de> {
     /// value of selected variant, `None` for unit variant
     value: Option<Value<'de>>,
     use_to_json: bool,
+    remaining_recursion: usize,
 }
 
 impl<'de> de::EnumAccess<'de> for EnumAccessImpl<'de> {
@@ -661,6 +699,7 @@ impl<'de> de::EnumAccess<'de> for EnumAccessImpl<'de> {
             VariantAccessImpl {
                 value: self.value,
                 use_to_json: self.use_to_json,
+                remaining_recursion: self.remaining_recursion,
             },
         ))
     }
@@ -669,6 +708,7 @@ impl<'de> de::EnumAccess<'de> for EnumAccessImpl<'de> {
 struct VariantAccessImpl<'de> {
     value: Option<Value<'de>>,
     use_to_json: bool,
+    remaining_recursion: usize,
 }
 
 impl<'de> de::VariantAccess<'de> for VariantAccessImpl<'de> {
@@ -691,6 +731,7 @@ impl<'de> de::VariantAccess<'de> for VariantAccessImpl<'de> {
 
         seed.deserialize(&mut Deserializer {
             use_to_json: self.use_to_json,
+            remaining_recursion: self.remaining_recursion,
             ..Deserializer::from(value)
         })
     }
@@ -706,6 +747,7 @@ impl<'de> de::VariantAccess<'de> for VariantAccessImpl<'de> {
         de::Deserializer::deserialize_seq(
             &mut Deserializer {
                 use_to_json: self.use_to_json,
+                remaining_recursion: self.remaining_recursion,
                 ..Deserializer::from(value)
             },
             visitor,
@@ -723,6 +765,7 @@ impl<'de> de::VariantAccess<'de> for VariantAccessImpl<'de> {
         de::Deserializer::deserialize_map(
             &mut Deserializer {
                 use_to_json: self.use_to_json,
+                remaining_recursion: self.remaining_recursion,
                 ..Deserializer::from(value)
             },
             visitor,
@@ -751,6 +794,143 @@ mod tests {
         match T::deserialize(&mut deserializer) {
             Ok(val) => val,
             Err(e) => panic!("{}", e.catch(&ctx)),
+        }
+    }
+
+    #[test]
+    fn test_recursion_limit() {
+        for (source, depth) in [
+            ("42", 0),
+            ("null", 0),
+            ("[]", 1),
+            ("({})", 1),
+            ("[42, 43, 44]", 1),
+            ("({ a: 1, b: 2, c: 3 })", 1),
+            ("[[], [], []]", 2),
+            ("({ a: {}, b: {}, c: {} })", 2),
+            ("[{ a: [42] }]", 3),
+            ("new Proxy([[42]], {})", 2),
+        ] {
+            for limit in 0..=3 {
+                let rt = Runtime::default();
+                rt.context().with(|cx| {
+                    let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                    let mut de = ValueDeserializer::new(value).with_recursion_limit(limit);
+                    let result = serde::de::IgnoredAny::deserialize(&mut de);
+                    if limit >= depth {
+                        assert!(result.is_ok(), "{source}, limit {limit}");
+                    } else {
+                        assert!(
+                            result
+                                .unwrap_err()
+                                .catch(&cx)
+                                .to_string()
+                                .contains("Recursion limit exceeded")
+                        );
+                    }
+                    assert_eq!(de.remaining_recursion, limit);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn test_default_recursion_limit_and_override() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            for (depth, succeeds) in [(128, true), (129, false)] {
+                let value = cx.eval::<Value<'_>, _>(format!(
+                    "(() => {{ let value = 42; for (let i = 0; i < {depth}; i++) value = [value]; return value; }})()"
+                )).unwrap();
+                let result = from_value::<serde::de::IgnoredAny>(value.clone());
+                if succeeds {
+                    assert!(result.is_ok());
+                } else {
+                    assert!(result.unwrap_err().catch(&cx).to_string().contains("Recursion limit exceeded"));
+                }
+                let mut de = ValueDeserializer::new(value).with_recursion_limit(129);
+                assert!(serde::de::IgnoredAny::deserialize(&mut de).is_ok());
+            }
+        });
+    }
+
+    #[test]
+    fn test_recursion_limit_generated_children() {
+        for source in [
+            "(() => { function node() { return { toJSON() { return { child: node() }; } }; } return node(); })()",
+            "(() => { function node() { return { toJSON() { return [node()]; } }; } return node(); })()",
+        ] {
+            let rt = Runtime::default();
+            rt.context().with(|cx| {
+                let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                let mut de = ValueDeserializer::new(value).with_recursion_limit(4);
+                let error = serde::de::IgnoredAny::deserialize(&mut de).unwrap_err();
+                assert!(
+                    error
+                        .catch(&cx)
+                        .to_string()
+                        .contains("Recursion limit exceeded")
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn test_recursion_limit_bigint_conversion() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<(), _>("BigInt.prototype.toString = function() { return this; };")
+                .unwrap();
+            let value = cx.eval::<Value<'_>, _>("1n").unwrap();
+            let mut de = ValueDeserializer::new(value)
+                .without_to_json()
+                .with_recursion_limit(4);
+            let error = String::deserialize(&mut de).unwrap_err();
+            assert!(
+                error
+                    .catch(&cx)
+                    .to_string()
+                    .contains("Recursion limit exceeded")
+            );
+        });
+    }
+
+    #[test]
+    fn test_recursion_limit_enum_payloads() {
+        #[allow(dead_code)]
+        #[derive(Debug, Deserialize)]
+        enum Tree {
+            Leaf,
+            Node(Box<Tree>),
+            Pair(Box<Tree>, Box<Tree>),
+            Branch { child: Box<Tree> },
+        }
+        for (source, depth) in [
+            (r#""Leaf""#, 0),
+            (r#"({ Node: "Leaf" })"#, 1),
+            (r#"({ Node: { Node: "Leaf" } })"#, 2),
+            (r#"({ Pair: ["Leaf", "Leaf"] })"#, 2),
+            (r#"({ Branch: { child: "Leaf" } })"#, 2),
+        ] {
+            for limit in 0..=2 {
+                let rt = Runtime::default();
+                rt.context().with(|cx| {
+                    let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                    let mut de = ValueDeserializer::new(value).with_recursion_limit(limit);
+                    let result = Tree::deserialize(&mut de);
+                    if limit >= depth {
+                        assert!(result.is_ok());
+                    } else {
+                        assert!(
+                            result
+                                .unwrap_err()
+                                .catch(&cx)
+                                .to_string()
+                                .contains("Recursion limit exceeded")
+                        );
+                    }
+                });
+            }
         }
     }
 
