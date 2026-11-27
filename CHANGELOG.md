@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
-- Deserializer: Will throw an error if recursing past the depth limit, defaults to 128.
+- Deserializer: Deserialization now returns a `RangeError` when exceeding the recursion limit, which defaults to 128.
 
 ### Added
 
-- Deserializer: Disable calls to `toJSON` with `Deserializer::without_to_json()`
-- Deserializer: Recursion limit is now finite and controlled with `Deserializer::with_recursion_limit()`
+- Deserializer: Disable `toJSON` lookups and calls with `Deserializer::without_to_json()`.
+- Deserializer: Override the maximum recursion depth with `Deserializer::with_recursion_limit()`.
 
 ### Changed
 
@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Deserializer: Apply `toJSON` only once per value position, preventing infinite recursion when a hook returns `this` or another object with a hook.
+- Deserializer: Apply `toJSON` only once per value position, avoiding repeated hook invocation on its return value and infinite recursion when a hook returns `this`.
 - Deserializer: Honor root-level `toJSON` hooks on arrays and boxed primitives, and when deserializing options and enums.
 
 ### Security
