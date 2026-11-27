@@ -61,6 +61,17 @@ This is s why we offer the `strict` mode, that will stick to what the behaviour 
 let u: User = rquickjs_serde::from_value_strict(val).unwrap();
 ```
 
+## Disabling `toJSON`
+
+By default, deserialization uses JavaScript `toJSON` hooks. To skip these hooks and deserialize the underlying values, use `Deserializer::without_to_json()`:
+
+```rust
+use serde::Deserialize;
+
+let mut deserializer = rquickjs_serde::Deserializer::new(val).without_to_json();
+let u = User::deserialize(&mut deserializer)?;
+```
+
 ## Acknowledgements
 
 This project includes code derived from the [Javy](https://github.com/bytecodealliance/javy) project. See [`NOTICE`](./NOTICE) for more details.

@@ -62,6 +62,9 @@ pub struct Deserializer<'js> {
     /// In strict mode, only JSON-able values are allowed.
     strict: bool,
     map_key: bool,
+    /// Whether `toJSON` has been applied at the current value's position.
+    to_json_applied: bool,
+    use_to_json: bool,
     current_kv: Option<(Value<'js>, Value<'js>)>,
     /// Stack to track circular dependencies.
     stack: Vec<Value<'js>>,
@@ -72,6 +75,21 @@ impl<'js> Deserializer<'js> {
         Self::from(value)
     }
 
+    /// Disables `toJSON` lookups and calls, including for nested values.
+    ///
+    /// Other JavaScript code, such as property getters, proxy traps, and
+    /// `valueOf` or `toString` methods, may still run during deserialization.
+    pub fn without_to_json(self) -> Self {
+        Self {
+            use_to_json: false,
+            ..self
+        }
+    }
+
+    /// Enables strict mode, restricting deserialization to JSON-compatible values
+    /// without fallback conversions.
+    ///
+    /// `toJSON` hooks remain enabled unless disabled with [`Self::without_to_json`].
     pub fn with_strict(self) -> Self {
         Self {
             strict: true,
@@ -86,6 +104,8 @@ impl<'de> From<Value<'de>> for Deserializer<'de> {
             value,
             strict: false,
             map_key: false,
+            to_json_applied: false,
+            use_to_json: true,
             current_kv: None,
             // We are probaby over allocating here. But it's probably fine to
             // over allocate to avoid paying the cost of subsequent allocations.
@@ -95,6 +115,20 @@ impl<'de> From<Value<'de>> for Deserializer<'de> {
 }
 
 impl<'js> Deserializer<'js> {
+    fn apply_to_json(&mut self) -> Result<()> {
+        if self.use_to_json && !self.map_key && !self.to_json_applied {
+            // Property and array access apply the hook with their own key before
+            // deserializing. Only the root reaches here without it applied.
+            self.to_json_applied = true;
+            if (self.value.is_object() || self.value.is_big_int())
+                && let Some(f) = get_to_json(&self.value)
+            {
+                self.value = f.call((This(self.value.clone()), "")).map_err(Error::new)?;
+            }
+        }
+        Ok(())
+    }
+
     fn deserialize_number<'de, V>(&mut self, visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
@@ -158,6 +192,8 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
+        self.apply_to_json()?;
+
         if self.value.is_number() {
             return self.deserialize_number(visitor);
         }
@@ -220,35 +256,17 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             return visitor.visit_seq(seq_access);
         }
 
-        if get_class_id(&self.value) == ClassId::BigInt || self.value.is_big_int() {
-            if let Some(f) = get_to_json(&self.value) {
-                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
-                self.value = v;
-                return self.deserialize_any(visitor);
-            }
-
-            if let Some(f) = get_to_string(&self.value)
-                && !self.strict
-            {
-                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
-                self.value = v;
-                return self.deserialize_any(visitor);
-            }
+        if (get_class_id(&self.value) == ClassId::BigInt || self.value.is_big_int())
+            && let Some(f) = get_to_string(&self.value)
+            && !self.strict
+        {
+            let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
+            self.value = v;
+            return self.deserialize_any(visitor);
         }
 
         if self.value.is_object() {
             ensure_supported(&self.value)?;
-
-            if let Some(f) = get_to_json(&self.value) {
-                let v: Value = f.call((This(self.value.clone()),)).map_err(Error::new)?;
-
-                if v.is_undefined() {
-                    self.value = Value::new_undefined(v.ctx().clone());
-                } else {
-                    self.value = v;
-                }
-                return self.deserialize_any(visitor);
-            }
 
             let map_access = MapAccess::new(self, self.value.clone().into_object().unwrap())?;
             let result = visitor.visit_map(map_access);
@@ -269,6 +287,8 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
+        self.apply_to_json()?;
+
         if self.value.is_null() || self.value.is_undefined() {
             visitor.visit_none()
         } else {
@@ -292,6 +312,8 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
+        self.apply_to_json()?;
+
         if get_class_id(&self.value) == ClassId::String
             && let Some(f) = get_to_string(&self.value)
         {
@@ -309,6 +331,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             visitor.visit_enum(EnumAccessImpl {
                 variant,
                 value: Some(value.clone()),
+                use_to_json: self.use_to_json,
             })
         } else if let Some(s) = self.value.as_string() {
             // Now require a primitive string.
@@ -319,6 +342,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             visitor.visit_enum(EnumAccessImpl {
                 variant: s,
                 value: None,
+                use_to_json: self.use_to_json,
             })
         } else {
             Err(Error::new("expected a string or object for enum"))
@@ -383,7 +407,7 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
             if let Some(kv) = self.properties.next() {
                 let (k, v) = kv.map_err(Error::new)?;
 
-                let to_json = get_to_json(&v);
+                let to_json = self.de.use_to_json.then(|| get_to_json(&v)).flatten();
                 let v = if let Some(f) = to_json {
                     f.call((This(v.clone()), k.clone())).map_err(Error::new)?
                 } else {
@@ -429,6 +453,7 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
         V: de::DeserializeSeed<'de>,
     {
         self.de.value = self.de.current_kv.clone().unwrap().1;
+        self.de.to_json_applied = true;
         self.de.check_cycles()?;
         seed.deserialize(&mut *self.de)
     }
@@ -501,7 +526,7 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
     {
         if self.index < self.length {
             let el = get_index(&self.seq, self.index).map_err(Error::new)?;
-            let to_json = get_to_json(&el);
+            let to_json = self.de.use_to_json.then(|| get_to_json(&el)).flatten();
 
             if let Some(f) = to_json {
                 let index_value = JSString::from_str(el.ctx().clone(), &self.index.to_string());
@@ -513,6 +538,7 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
             } else {
                 self.de.value = Null.into_value(self.seq.ctx().clone())
             }
+            self.de.to_json_applied = true;
             self.index += 1;
             // Check cycles right before starting the deserialization for the
             // sequence elements.
@@ -618,6 +644,7 @@ struct EnumAccessImpl<'de> {
     variant: String,
     /// value of selected variant, `None` for unit variant
     value: Option<Value<'de>>,
+    use_to_json: bool,
 }
 
 impl<'de> de::EnumAccess<'de> for EnumAccessImpl<'de> {
@@ -629,12 +656,19 @@ impl<'de> de::EnumAccess<'de> for EnumAccessImpl<'de> {
         V: de::DeserializeSeed<'de>,
     {
         let val = seed.deserialize(self.variant.into_deserializer())?;
-        Ok((val, VariantAccessImpl { value: self.value }))
+        Ok((
+            val,
+            VariantAccessImpl {
+                value: self.value,
+                use_to_json: self.use_to_json,
+            },
+        ))
     }
 }
 
 struct VariantAccessImpl<'de> {
     value: Option<Value<'de>>,
+    use_to_json: bool,
 }
 
 impl<'de> de::VariantAccess<'de> for VariantAccessImpl<'de> {
@@ -655,7 +689,10 @@ impl<'de> de::VariantAccess<'de> for VariantAccessImpl<'de> {
             .value
             .ok_or_else(|| Error::new("expected value for newtype variant"))?;
 
-        seed.deserialize(&mut Deserializer::from(value))
+        seed.deserialize(&mut Deserializer {
+            use_to_json: self.use_to_json,
+            ..Deserializer::from(value)
+        })
     }
 
     fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value>
@@ -666,7 +703,13 @@ impl<'de> de::VariantAccess<'de> for VariantAccessImpl<'de> {
             .value
             .ok_or_else(|| Error::new("expected tuple variant"))?;
 
-        de::Deserializer::deserialize_seq(&mut Deserializer::from(value), visitor)
+        de::Deserializer::deserialize_seq(
+            &mut Deserializer {
+                use_to_json: self.use_to_json,
+                ..Deserializer::from(value)
+            },
+            visitor,
+        )
     }
 
     fn struct_variant<V>(self, _fields: &'static [&'static str], visitor: V) -> Result<V::Value>
@@ -677,7 +720,13 @@ impl<'de> de::VariantAccess<'de> for VariantAccessImpl<'de> {
             .value
             .ok_or_else(|| Error::new("expected struct variant"))?;
 
-        de::Deserializer::deserialize_map(&mut Deserializer::from(value), visitor)
+        de::Deserializer::deserialize_map(
+            &mut Deserializer {
+                use_to_json: self.use_to_json,
+                ..Deserializer::from(value)
+            },
+            visitor,
+        )
     }
 }
 
@@ -703,6 +752,333 @@ mod tests {
             Ok(val) => val,
             Err(e) => panic!("{}", e.catch(&ctx)),
         }
+    }
+
+    #[test]
+    fn test_without_to_json() {
+        for source in [
+            "({ answer: 42, toJSON() { throw new Error('hook called'); } })",
+            "Object.defineProperty({ answer: 42 }, 'toJSON', { get() { throw new Error('getter called'); } })",
+            "new Proxy({ answer: 42 }, { get(target, key, receiver) { if (key === 'toJSON') throw new Error('trap called'); return Reflect.get(target, key, receiver); } })",
+        ] {
+            let rt = Runtime::default();
+            rt.context().with(|cx| {
+                // Exercise root, property, and array-element lookups separately.
+                let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                let mut de = ValueDeserializer::new(value).without_to_json();
+                let expected = BTreeMap::from([("answer".to_owned(), 42)]);
+                assert_eq!(
+                    BTreeMap::<String, i32>::deserialize(&mut de).unwrap(),
+                    expected
+                );
+
+                let value = cx
+                    .eval::<Value<'_>, _>(format!("({{ child: {source} }})"))
+                    .unwrap();
+                let mut de = ValueDeserializer::new(value).without_to_json();
+                assert_eq!(
+                    BTreeMap::<String, BTreeMap<String, i32>>::deserialize(&mut de).unwrap(),
+                    BTreeMap::from([("child".into(), expected.clone())])
+                );
+
+                let value = cx.eval::<Value<'_>, _>(format!("Object.defineProperty([{source}], 'toJSON', {{ get() {{ throw new Error('array getter called'); }} }})")).unwrap();
+                let mut de = ValueDeserializer::new(value).without_to_json();
+                assert_eq!(
+                    Vec::<BTreeMap<String, i32>>::deserialize(&mut de).unwrap(),
+                    vec![expected]
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn test_without_to_json_bigint() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            cx.eval::<(), _>(
+                "Object.defineProperty(BigInt.prototype, 'toJSON', { get() { throw new Error('getter called'); } });",
+            ).unwrap();
+            for source in ["1n", "Object(1n)"] {
+                let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                let mut de = ValueDeserializer::new(value).without_to_json();
+                assert_eq!(String::deserialize(&mut de).unwrap(), "1");
+
+                let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                let mut de = ValueDeserializer::new(value).with_strict().without_to_json();
+                let error = String::deserialize(&mut de).unwrap_err();
+                let expected = if source == "1n" { "Unsupported type" } else { "BigInt not supported" };
+                assert!(error.catch(&cx).to_string().contains(expected));
+            }
+        });
+    }
+
+    #[test]
+    fn test_without_to_json_enum_payloads() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        enum Test {
+            Newtype(BTreeMap<String, i32>),
+            Tuple(BTreeMap<String, i32>, i32),
+            Struct { child: BTreeMap<String, i32> },
+        }
+        let child = BTreeMap::from([("answer".into(), 42)]);
+        for (source, expected) in [
+            ("({ Newtype: child })", Test::Newtype(child.clone())),
+            (
+                "({ Tuple: Object.defineProperty([child, 7], 'toJSON', descriptor) })",
+                Test::Tuple(child.clone(), 7),
+            ),
+            (
+                "({ Struct: Object.defineProperty({ child }, 'toJSON', descriptor) })",
+                Test::Struct { child },
+            ),
+        ] {
+            let rt = Runtime::default();
+            rt.context().with(|cx| {
+                cx.eval::<(), _>(
+                    "const descriptor = { get() { throw new Error('getter called'); } }; const child = Object.defineProperty({ answer: 42 }, 'toJSON', descriptor);",
+                ).unwrap();
+                let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                let mut de = ValueDeserializer::new(value).without_to_json();
+                assert_eq!(Test::deserialize(&mut de).unwrap(), expected);
+            });
+        }
+    }
+
+    #[test]
+    fn test_to_json_returns_this() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            let value = cx
+                .eval::<Value<'_>, _>(
+                    r#"
+                    var calls = [];
+                    ({
+                        answer: 42,
+                        toJSON(key) {
+                            calls.push(key);
+                            if (calls.length > 1) throw new Error("toJSON called again");
+                            return this;
+                        }
+                    })
+                    "#,
+                )
+                .unwrap();
+            let result = deserialize_value::<BTreeMap<String, i32>>(value);
+            assert_eq!(result, BTreeMap::from([("answer".into(), 42)]));
+            assert_eq!(
+                cx.globals().get::<_, Vec<String>>("calls").unwrap(),
+                vec![""]
+            );
+        });
+    }
+
+    #[test]
+    fn test_to_json_does_not_call_returned_objects_hook() {
+        for source in [
+            r#"
+            const a = { toJSON() { return b; } };
+            const b = { answer: 42, toJSON() { throw new Error("returned hook called"); } };
+            a
+            "#,
+            r#"
+            var calls = 0;
+            const a = {
+                toJSON() {
+                    if (++calls > 1) throw new Error("toJSON called again");
+                    return b;
+                }
+            };
+            const b = { answer: 42, toJSON() { return a; } };
+            a
+            "#,
+            r#"
+            function toJSON() {
+                if (++calls > 1) throw new Error("toJSON called again");
+                return { answer: 42, toJSON };
+            }
+            var calls = 0;
+            ({ toJSON })
+            "#,
+        ] {
+            let rt = Runtime::default();
+            rt.context().with(|cx| {
+                let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                let result = deserialize_value::<BTreeMap<String, i32>>(value);
+                assert_eq!(result, BTreeMap::from([("answer".into(), 42)]));
+            });
+        }
+    }
+
+    #[test]
+    fn test_to_json_runs_once_for_each_child_with_its_key() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            let value = cx
+                .eval::<Value<'_>, _>(
+                    r#"
+                    var calls = [];
+                    function child() {
+                        return {
+                            answer: 42,
+                            toJSON(key) {
+                                calls.push(key);
+                                if (calls.length > 4) throw new Error("toJSON called again");
+                                return this;
+                            }
+                        };
+                    }
+                    ({
+                        toJSON(key) {
+                            calls.push(key);
+                            return { property: child(), elements: [child(), child()] };
+                        }
+                    })
+                    "#,
+                )
+                .unwrap();
+            #[derive(Debug, Deserialize, PartialEq)]
+            struct Output {
+                property: BTreeMap<String, i32>,
+                elements: Vec<BTreeMap<String, i32>>,
+            }
+            let child = BTreeMap::from([("answer".into(), 42)]);
+            assert_eq!(
+                deserialize_value::<Output>(value),
+                Output {
+                    property: child.clone(),
+                    elements: vec![child.clone(), child],
+                }
+            );
+            // Object property order is preserved, and array indices are strings.
+            assert_eq!(
+                cx.globals().get::<_, Vec<String>>("calls").unwrap(),
+                vec!["", "property", "0", "1"]
+            );
+        });
+    }
+
+    #[test]
+    fn test_to_json_returns_array_with_its_own_hook() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            let value = cx
+                .eval::<Value<'_>, _>(
+                    r#"
+                    const result = [42];
+                    result.toJSON = () => { throw new Error("returned hook called"); };
+                    ({ toJSON() { return result; } })
+                    "#,
+                )
+                .unwrap();
+            assert_eq!(deserialize_value::<Vec<i32>>(value), vec![42]);
+        });
+    }
+
+    #[test]
+    fn test_root_array_to_json() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            let value = cx
+                .eval::<Value<'_>, _>(
+                    r#"
+                    var calls = [];
+                    const value = [42];
+                    value.toJSON = function(key) {
+                        calls.push(key);
+                        if (calls.length > 1) throw new Error("toJSON called again");
+                        return this;
+                    };
+                    value
+                    "#,
+                )
+                .unwrap();
+            assert_eq!(deserialize_value::<Vec<i32>>(value), vec![42]);
+            assert_eq!(
+                cx.globals().get::<_, Vec<String>>("calls").unwrap(),
+                vec![""]
+            );
+        });
+    }
+
+    #[test]
+    fn test_enum_to_json() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        enum Test {
+            One,
+        }
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            let value = cx
+                .eval::<Value<'_>, _>(r#"({ toJSON() { return "One"; } })"#)
+                .unwrap();
+            assert_eq!(deserialize_value::<Test>(value), Test::One);
+        });
+    }
+
+    #[test]
+    fn test_bigint_to_json_returns_this() {
+        for source in ["1n", "Object(1n)"] {
+            let rt = Runtime::default();
+            rt.context().with(|cx| {
+                cx.eval::<(), _>(
+                    r#"
+                    var calls = 0;
+                    BigInt.prototype.toJSON = function(key) {
+                        if (key !== "" || ++calls > 1) throw new Error("unexpected toJSON call");
+                        return this;
+                    };
+                    "#,
+                )
+                .unwrap();
+                let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                assert_eq!(deserialize_value::<String>(value), "1");
+                assert_eq!(cx.eval::<i32, _>("calls").unwrap(), 1);
+
+                cx.eval::<(), _>("calls = 0").unwrap();
+                let value = cx.eval::<Value<'_>, _>(source).unwrap();
+                assert!(crate::from_value_strict::<String>(value).is_err());
+                cx.catch();
+                assert_eq!(cx.eval::<i32, _>("calls").unwrap(), 1);
+            });
+        }
+    }
+
+    #[test]
+    fn test_to_json_returns_none() {
+        for result in ["null", "undefined"] {
+            let rt = Runtime::default();
+            rt.context().with(|cx| {
+                let value = cx
+                    .eval::<Value<'_>, _>(format!("({{ toJSON() {{ return {result}; }} }})"))
+                    .unwrap();
+                assert_eq!(deserialize_value::<Option<i32>>(value), None);
+            });
+        }
+    }
+
+    #[test]
+    fn test_to_json_preserves_cycle_detection() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            let value = cx
+                .eval::<Value<'_>, _>(
+                    r#"
+                    var calls = 0;
+                    const value = {
+                        toJSON() {
+                            if (++calls > 2) throw new Error("toJSON called again");
+                            return this;
+                        }
+                    };
+                    value.child = value;
+                    value
+                    "#,
+                )
+                .unwrap();
+            let err = from_value::<BTreeMap<String, BTreeMap<String, i32>>>(value).unwrap_err();
+            assert!(err.catch(&cx).to_string().contains("circular dependency"));
+            assert_eq!(cx.eval::<i32, _>("calls").unwrap(), 2);
+        });
     }
 
     #[test]
